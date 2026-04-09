@@ -234,7 +234,16 @@ class LineAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "group" if chat_id.startswith("C") else "dm"}
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        pass  # LINE does not support typing indicators via API
+        """Show LINE loading animation (typing indicator) via Loading Animation API."""
+        if not self._http_client:
+            return
+        try:
+            await self._http_client.post(
+                "https://api.line.me/v2/bot/chat/loading/start",
+                json={"chatId": chat_id, "loadingSeconds": 20},
+            )
+        except Exception as exc:
+            logger.debug("[line] loading animation failed: %s", exc)
 
     def format_message(self, content: str) -> str:
         return _strip_markdown(content)
