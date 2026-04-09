@@ -68,6 +68,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    LINE = "line"
+    LINE_LYNX = "line_lynx"
 
 
 @dataclass
@@ -337,7 +339,10 @@ class GatewayConfig:
                 config.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET")
             ):
                 connected.append(platform)
-        
+            # LINE uses extra dict for channel credentials
+            elif platform in (Platform.LINE, Platform.LINE_LYNX) and config.extra.get("channel_access_token"):
+                connected.append(platform)
+
         return connected
     
     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
@@ -1314,6 +1319,29 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 chat_id=qq_home,
                 name=os.getenv("QQBOT_HOME_CHANNEL_NAME") or os.getenv(qq_home_name_env, "Home"),
             )
+    # LINE (main account)
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+    line_secret = os.getenv("LINE_CHANNEL_SECRET", "")
+    if line_token and line_secret:
+        if Platform.LINE not in config.platforms:
+            config.platforms[Platform.LINE] = PlatformConfig()
+        config.platforms[Platform.LINE].enabled = True
+        config.platforms[Platform.LINE].extra.update({
+            "channel_access_token": line_token,
+            "channel_secret": line_secret,
+        })
+
+    # LINE Lynx (hospital account)
+    lynx_token = os.getenv("LINE_LYNX_CHANNEL_ACCESS_TOKEN", "")
+    lynx_secret = os.getenv("LINE_LYNX_CHANNEL_SECRET", "")
+    if lynx_token and lynx_secret:
+        if Platform.LINE_LYNX not in config.platforms:
+            config.platforms[Platform.LINE_LYNX] = PlatformConfig()
+        config.platforms[Platform.LINE_LYNX].enabled = True
+        config.platforms[Platform.LINE_LYNX].extra.update({
+            "channel_access_token": lynx_token,
+            "channel_secret": lynx_secret,
+        })
 
     # Yuanbao — YUANBAO_APP_ID preferred
     yuanbao_app_id = os.getenv("YUANBAO_APP_ID") or os.getenv("YUANBAO_APP_KEY")
