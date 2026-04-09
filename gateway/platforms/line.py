@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 LINE_SDK_AVAILABLE = False
 try:
+    from linebot.v3 import WebhookParser
+    from linebot.v3.exceptions import InvalidSignatureError
     from linebot.v3.webhooks import (
-        WebhookParser,
         MessageEvent as LineMessageEvent,
-        InvalidSignatureError,
         TextMessageContent,
         ImageMessageContent,
         StickerMessageContent,
@@ -237,6 +237,27 @@ class LineAdapter(BasePlatformAdapter):
     def format_message(self, content: str) -> str:
         return _strip_markdown(content)
 
-    async def _handle_webhook(self, request):
-        """Placeholder — full implementation in Task 5."""
-        return None
+    async def _handle_webhook(self, request) -> "web.Response":
+        from aiohttp import web
+
+        body = await request.read()
+        signature = request.headers.get("X-Line-Signature")
+        if not signature:
+            return web.Response(status=401, text="missing signature")
+
+        try:
+            parser = WebhookParser(self.channel_secret)
+            events = parser.parse(body.decode("utf-8", errors="replace"), signature)
+        except InvalidSignatureError:
+            return web.Response(status=403, text="invalid signature")
+        except Exception as exc:
+            logger.error("[line] webhook parse error: %s", exc)
+            return web.Response(status=400, text="parse error")
+
+        for event in events:
+            if not isinstance(event, LineMessageEvent):
+                # Silently discard Follow, Join, Leave, Postback, etc.
+                continue
+            asyncio.create_task(self._process_line_event(event))
+
+        return web.Response(text="ok")

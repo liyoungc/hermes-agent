@@ -141,6 +141,7 @@ include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "gateway", "gat
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
 ]

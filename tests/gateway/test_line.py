@@ -213,3 +213,64 @@ class TestLineAdapterConnect:
         import asyncio
         result = asyncio.get_event_loop().run_until_complete(adapter.connect())
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Chunk 3: Webhook handler
+# ---------------------------------------------------------------------------
+
+class TestLineWebhookSignature:
+    """Test HTTP endpoint signature verification via aiohttp TestClient."""
+
+    def _make_app(self, **extra):
+        """Build an aiohttp app from the adapter (without starting a real server)."""
+        from aiohttp import web
+        adapter = _make_adapter(**extra)
+        app = web.Application()
+        app.router.add_get("/health", lambda _: web.Response(text="ok"))
+        app.router.add_post(adapter.webhook_path, adapter._handle_webhook)
+        return app, adapter
+
+    @pytest.mark.asyncio
+    async def test_missing_signature_returns_401(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = self._make_app()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/webhook/line", data=b"{}")
+            assert resp.status == 401
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_returns_403(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = self._make_app()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhook/line",
+                data=b'{"destination":"U123","events":[]}',
+                headers={"X-Line-Signature": "invalidsignature"},
+            )
+            assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_valid_signature_empty_events_returns_200(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        body = b'{"destination":"U123","events":[]}'
+        sig = _line_sig(body, "test-secret")
+        app, _ = self._make_app()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhook/line",
+                data=body,
+                headers={"X-Line-Signature": sig},
+            )
+            assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_returns_ok(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        app, _ = self._make_app()
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/health")
+            assert resp.status == 200
+            text = await resp.text()
+            assert text == "ok"
