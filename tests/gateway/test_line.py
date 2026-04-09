@@ -131,3 +131,85 @@ class TestLineHelpers:
         monkeypatch.delenv("LINE_LYNX_CHANNEL_ACCESS_TOKEN", raising=False)
         from gateway.platforms.line import check_line_requirements
         assert check_line_requirements() is False
+
+# ---------------------------------------------------------------------------
+# Chunk 2: Adapter init + connect/disconnect
+# ---------------------------------------------------------------------------
+
+class TestLineAdapterInit:
+    def test_reads_token_from_extra(self):
+        adapter = _make_adapter(channel_access_token="my-token")
+        assert adapter.channel_access_token == "my-token"
+
+    def test_reads_secret_from_extra(self):
+        adapter = _make_adapter(channel_secret="my-secret")
+        assert adapter.channel_secret == "my-secret"
+
+    def test_default_port_for_line(self):
+        adapter = _make_adapter(platform=Platform.LINE)
+        assert adapter.webhook_port == 18791
+
+    def test_default_port_for_line_lynx(self):
+        adapter = _make_adapter(platform=Platform.LINE_LYNX)
+        assert adapter.webhook_port == 18792
+
+    def test_default_path_for_line(self):
+        adapter = _make_adapter(platform=Platform.LINE)
+        assert adapter.webhook_path == "/webhook/line"
+
+    def test_default_path_for_line_lynx(self):
+        adapter = _make_adapter(platform=Platform.LINE_LYNX)
+        assert adapter.webhook_path == "/webhook/line/lynx"
+
+    def test_custom_port_overrides_default(self):
+        adapter = _make_adapter(webhook_port=19999)
+        assert adapter.webhook_port == 19999
+
+    def test_group_personas_loaded(self):
+        adapter = _make_adapter(group_personas={"C123": "mochi-line"})
+        assert adapter.group_personas == {"C123": "mochi-line"}
+
+    def test_default_persona_loaded(self):
+        adapter = _make_adapter(default_persona="cattia-line")
+        assert adapter.default_persona == "cattia-line"
+
+    def test_allow_from_loaded(self):
+        adapter = _make_adapter(allow_from=["U123", "U456"])
+        assert adapter.allow_from == ["U123", "U456"]
+
+    def test_platform_is_line(self):
+        adapter = _make_adapter(platform=Platform.LINE)
+        assert adapter.platform == Platform.LINE
+
+    def test_platform_is_line_lynx(self):
+        adapter = _make_adapter(platform=Platform.LINE_LYNX)
+        assert adapter.platform == Platform.LINE_LYNX
+
+
+class TestLineAdapterConnect:
+    def test_connect_fails_without_sdk(self, monkeypatch):
+        import gateway.platforms.line as line_mod
+        monkeypatch.setattr(line_mod, "LINE_SDK_AVAILABLE", False)
+        adapter = _make_adapter()
+
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+        assert result is False
+
+    def test_connect_fails_without_token(self):
+        from gateway.platforms.line import LineAdapter
+        cfg = PlatformConfig(enabled=True, extra={"channel_secret": "sec"})
+        adapter = LineAdapter(cfg)
+
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+        assert result is False
+
+    def test_connect_fails_without_secret(self):
+        from gateway.platforms.line import LineAdapter
+        cfg = PlatformConfig(enabled=True, extra={"channel_access_token": "tok"})
+        adapter = LineAdapter(cfg)
+
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+        assert result is False
