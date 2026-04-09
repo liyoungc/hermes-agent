@@ -66,6 +66,8 @@ class Platform(Enum):
     WECOM_CALLBACK = "wecom_callback"
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
+    LINE = "line"
+    LINE_LYNX = "line_lynx"
 
 
 @dataclass
@@ -302,6 +304,9 @@ class GatewayConfig:
                 connected.append(platform)
             # BlueBubbles uses extra dict for local server config
             elif platform == Platform.BLUEBUBBLES and config.extra.get("server_url") and config.extra.get("password"):
+                connected.append(platform)
+            # LINE uses extra dict for channel credentials
+            elif platform in (Platform.LINE, Platform.LINE_LYNX) and config.extra.get("channel_access_token"):
                 connected.append(platform)
         return connected
     
@@ -1073,6 +1078,30 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=bluebubbles_home,
             name=os.getenv("BLUEBUBBLES_HOME_CHANNEL_NAME", "Home"),
         )
+
+    # LINE (main account)
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
+    line_secret = os.getenv("LINE_CHANNEL_SECRET", "")
+    if line_token and line_secret:
+        if Platform.LINE not in config.platforms:
+            config.platforms[Platform.LINE] = PlatformConfig()
+        config.platforms[Platform.LINE].enabled = True
+        config.platforms[Platform.LINE].extra.update({
+            "channel_access_token": line_token,
+            "channel_secret": line_secret,
+        })
+
+    # LINE Lynx (hospital account)
+    lynx_token = os.getenv("LINE_LYNX_CHANNEL_ACCESS_TOKEN", "")
+    lynx_secret = os.getenv("LINE_LYNX_CHANNEL_SECRET", "")
+    if lynx_token and lynx_secret:
+        if Platform.LINE_LYNX not in config.platforms:
+            config.platforms[Platform.LINE_LYNX] = PlatformConfig()
+        config.platforms[Platform.LINE_LYNX].enabled = True
+        config.platforms[Platform.LINE_LYNX].extra.update({
+            "channel_access_token": lynx_token,
+            "channel_secret": lynx_secret,
+        })
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
