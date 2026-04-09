@@ -3323,6 +3323,12 @@ class GatewayRunner:
                 logger.warning("QQBot: aiohttp/httpx missing or QQ_APP_ID/QQ_CLIENT_SECRET not configured")
                 return None
             return QQAdapter(config)
+        elif platform in (Platform.LINE, Platform.LINE_LYNX):
+            from gateway.platforms.line import LineAdapter, check_line_requirements
+            if not check_line_requirements():
+                logger.warning("LINE: httpx missing or LINE_CHANNEL_ACCESS_TOKEN/LINE_CHANNEL_SECRET not configured")
+                return None
+            return LineAdapter(config)
 
         elif platform == Platform.YUANBAO:
             from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
