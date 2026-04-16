@@ -156,6 +156,8 @@ class LineAdapter(BasePlatformAdapter):
         self.allow_from: List[str] = extra.get("allow_from") or []
         self.dm_policy: str = extra.get("dm_policy") or "open"
         self.group_policy: str = extra.get("group_policy") or "open"
+        self.group_require_mention: bool = bool(extra.get("group_require_mention", False))
+        self.mention_keywords: List[str] = extra.get("mention_keywords") or []
 
         self._http_client: Optional[httpx.AsyncClient] = None
         self._runner = None
@@ -298,6 +300,16 @@ class LineAdapter(BasePlatformAdapter):
         text, msg_type, media_urls, media_types = await self._parse_message(event.message)
         if not text and not media_urls:
             return
+
+        # Mention filter: in groups, only respond when a mention keyword is present
+        if source_type == "group" and self.group_require_mention and self.mention_keywords:
+            text_lower = (text or "").lower()
+            if not any(kw.lower() in text_lower for kw in self.mention_keywords):
+                logger.debug(
+                    "[line/%s] group message ignored (no mention keyword)",
+                    self.platform.value,
+                )
+                return
 
         source = self.build_source(
             chat_id=group_id or user_id,
