@@ -1,0 +1,7 @@
+name: sqlite_vec
+version: 0.1.0
+description: "Hermes V3 long-term memory — local sqlite-vec store with hot episodes / cold curated semantic_facts, weekly human-approved promotion."
+pip_dependencies:
+  - sqlite-vec>=0.1.6
+hooks:
+  - on_pre_compress
