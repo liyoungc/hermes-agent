@@ -1,34 +1,88 @@
 """Hermes V3 memory plugin — sqlite-vec store with two-tier (hot/cold) design.
 
-W1 scope (this commit): schema bootstrap + provider stub registering with
-the MemoryProvider ABC. Read path / write path / weekly promotion arrive in
-W2 and W3 per spec docs/superpowers/specs/2026-05-02-hermes-memory-design.md.
-
 Activate via $HERMES_HOME/config.yaml:
 
-  memory:
-    provider: sqlite_vec
+    memory:
+      provider: sqlite_vec
+
+Read path (W2-3): on each turn, ``prefetch(query)`` runs
+``read_memory()`` in a worker thread (the gateway already owns the main
+asyncio loop, so we can't ``asyncio.run`` inline) and returns a markdown
+block prefixed with ``## Recent relevant memories``. The retrieved fact
+IDs are cached per session and bumped via ``sync_turn()`` after the
+reply is sent, per spec §4 hits accounting.
+
+Write path (W3) is still a no-op here — ``sync_turn`` only bumps hits.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 
+from .read import (
+    DEFAULT_K,
+    Fact,
+    bump_hits,
+    format_facts_for_prompt,
+    read_memory,
+)
 from .store import init_db
 
 logger = logging.getLogger(__name__)
+
+PREFETCH_TIMEOUT_S = 5.0  # Voyage typical 200-400ms; 5s is the kill-switch.
+RECALL_HEADER = "## Recent relevant memories"
 
 
 def _default_db_path(hermes_home: str) -> Path:
     return Path(hermes_home).expanduser() / "memories" / "memory.db"
 
 
+def _run_coro_in_thread(coro_factory, timeout: float):
+    """Run an async coroutine in a worker thread with its own event loop.
+
+    The hermes gateway runs its own asyncio loop, so ``asyncio.run`` from
+    this synchronous ABC method would raise "cannot be called from a
+    running event loop". We sidestep by spawning a dedicated thread with a
+    fresh loop, joining with a timeout. ``coro_factory`` is a zero-arg
+    callable that builds the coroutine inside the worker so the coroutine
+    is bound to the worker's loop.
+    """
+    box: Dict[str, Any] = {}
+
+    def runner():
+        loop = asyncio.new_event_loop()
+        try:
+            box["result"] = loop.run_until_complete(coro_factory())
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=runner, daemon=True, name="sqlite-vec-prefetch")
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"sqlite_vec worker exceeded {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
 class SqliteVecMemoryProvider(MemoryProvider):
-    """Hermes V3 long-term memory provider (W1 = schema only)."""
+    """Hermes V3 long-term memory provider (W2-3 = read path live)."""
+
+    def __init__(self) -> None:
+        self._conn = None
+        self._db_path: Optional[Path] = None
+        self._last_fact_ids: Dict[str, List[int]] = {}
+        self._lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -47,25 +101,78 @@ class SqliteVecMemoryProvider(MemoryProvider):
             from hermes_constants import get_hermes_home
             hermes_home = str(get_hermes_home())
         self._db_path = _default_db_path(hermes_home)
-        self._conn = init_db(self._db_path)
+        self._conn = init_db(self._db_path, check_same_thread=False)
         logger.info("sqlite_vec memory ready at %s", self._db_path)
 
     def system_prompt_block(self) -> str:
-        # W1: no system-prompt contribution. Persona stays in flat files
-        # (SOUL.md, USER.md, life-dimensions.md) handled by built-in memory.
+        # Persona stays in flat files (SOUL.md, USER.md, life-dimensions.md);
+        # the recall block is emitted from prefetch() per turn.
         return ""
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        # W2 will implement actual retrieval. Empty return for now keeps
-        # the plugin a no-op until we wire read_memory().
-        return ""
+        """Embed query, fetch top-k facts, format as a markdown block.
 
-    def sync_turn(self, user: str, assistant: str, **kwargs) -> None:
-        # W3 will implement async write-back. No-op for W1.
-        return None
+        Returns "" on empty/trivial query, missing connection, or any
+        error (Voyage outage, rate limit, etc.) so the gateway never
+        blocks a reply on memory recall. Retrieved fact IDs are stashed
+        for the matching ``sync_turn()`` call to bump hits.
+        """
+        if not self._conn or not query or not query.strip():
+            return ""
+
+        conn = self._conn
+
+        db_lock = self._lock
+
+        async def _do() -> List[Fact]:
+            with db_lock:
+                return await read_memory(query, conn, k=DEFAULT_K)
+
+        try:
+            facts = _run_coro_in_thread(_do, timeout=PREFETCH_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning("sqlite_vec prefetch error: %s", exc)
+            return ""
+
+        if not facts:
+            return ""
+
+        with self._lock:
+            self._last_fact_ids[session_id] = [f.id for f in facts]
+
+        body = format_facts_for_prompt(facts, with_meta=True)
+        return f"{RECALL_HEADER}\n{body}"
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+    ) -> None:
+        """Bump hits on facts retrieved during the matching prefetch.
+
+        Per spec §4 this fires AFTER the reply is delivered, so it must
+        never raise. Errors are swallowed by ``bump_hits`` itself.
+        """
+        with self._lock:
+            ids = self._last_fact_ids.pop(session_id, [])
+        if not ids or not self._conn:
+            return
+        conn = self._conn
+
+        db_lock = self._lock
+
+        async def _do() -> None:
+            with db_lock:
+                await bump_hits(ids, conn)
+
+        try:
+            _run_coro_in_thread(_do, timeout=PREFETCH_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning("sqlite_vec bump_hits worker error: %s", exc)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        # No model-facing tools; memory is implicit.
         return []
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any]) -> Any:

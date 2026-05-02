@@ -429,3 +429,128 @@ def test_format_facts_for_prompt_shape():
     assert "[禮揚.訓練] 禮揚 likes 5x5" in out
     assert "- 致妤生日 3/19" in out  # no entity prefix when None
     assert format_facts_for_prompt([]) == ""
+
+
+
+# ===========================================================================
+# W2-3: prefetch + sync_turn wiring
+# ===========================================================================
+
+from unittest.mock import patch as _patch_w23
+
+from plugins.memory.sqlite_vec import (
+    PREFETCH_TIMEOUT_S,
+    RECALL_HEADER,
+    SqliteVecMemoryProvider,
+    _run_coro_in_thread,
+)
+
+
+def _stubbed_provider(tmp_path, monkeypatch, query_seed: int = 51):
+    """Build a provider with a real DB, real conn, but stubbed Voyage."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    p = SqliteVecMemoryProvider()
+    p.initialize(session_id="t", hermes_home=str(tmp_path))
+    # Seed 3 facts via the same trigger-driven pipeline used in production.
+    for fact, ent, ts, seed in [
+        ("alpha", "禮揚.工作", "2026-04-01 09:00:00", 10),
+        ("beta",  "禮揚.家庭", "2026-05-02 09:00:00", 50),
+        ("gamma", None,        "2025-12-01 09:00:00", 90),
+    ]:
+        p._conn.execute(
+            "INSERT INTO semantic_facts(fact, entity, embedding, created_at) VALUES (?,?,?,?)",
+            (fact, ent, _vec(seed), ts),
+        )
+    p._conn.commit()
+
+    async def fake_embed(texts, **kw):
+        return [_vec(query_seed) for _ in texts]
+
+    return p, fake_embed
+
+
+def test_prefetch_returns_markdown_with_header(tmp_path, monkeypatch):
+    p, fake_embed = _stubbed_provider(tmp_path, monkeypatch)
+    with _patch_w23("plugins.memory.sqlite_vec.read.voyage_embed", fake_embed):
+        out = p.prefetch("when does my wife arrive home", session_id="s1")
+    assert out.startswith(RECALL_HEADER + "\n")
+    # Top fact 'beta' (seed=50) is closest to query (seed=51).
+    assert "beta" in out
+    # with_meta=True format includes importance + age.
+    assert "(importance:" in out and "days)" in out
+    # Fact ids cached for sync_turn to bump.
+    assert p._last_fact_ids["s1"]
+    p.shutdown()
+
+
+def test_prefetch_empty_query_no_op(tmp_path, monkeypatch):
+    p, fake_embed = _stubbed_provider(tmp_path, monkeypatch)
+    # No patch needed — should short-circuit before voyage_embed is reached.
+    assert p.prefetch("", session_id="s1") == ""
+    assert p.prefetch("   ", session_id="s1") == ""
+    assert "s1" not in p._last_fact_ids
+    p.shutdown()
+
+
+def test_prefetch_swallows_voyage_error(tmp_path, monkeypatch):
+    p, _ = _stubbed_provider(tmp_path, monkeypatch)
+
+    async def raise_embed(texts, **kw):
+        raise RuntimeError("voyage 503")
+
+    with _patch_w23("plugins.memory.sqlite_vec.read.voyage_embed", raise_embed):
+        out = p.prefetch("anything", session_id="s1")
+    assert out == ""  # Reply is never blocked on memory-recall failure.
+    assert "s1" not in p._last_fact_ids
+    p.shutdown()
+
+
+def test_sync_turn_bumps_hits_then_clears_cache(tmp_path, monkeypatch):
+    p, fake_embed = _stubbed_provider(tmp_path, monkeypatch)
+    with _patch_w23("plugins.memory.sqlite_vec.read.voyage_embed", fake_embed):
+        p.prefetch("query", session_id="s1")
+    cached_ids = list(p._last_fact_ids["s1"])
+    assert cached_ids
+
+    p.sync_turn("user said hi", "asst replied", session_id="s1")
+    # Cache cleared
+    assert "s1" not in p._last_fact_ids
+    # Hits incremented for exactly the cached IDs.
+    placeholders = ",".join("?" * len(cached_ids))
+    rows = p._conn.execute(
+        f"SELECT id, hits FROM semantic_facts WHERE id IN ({placeholders}) ORDER BY id",
+        cached_ids,
+    ).fetchall()
+    assert all(r["hits"] == 1 for r in rows), [(r["id"], r["hits"]) for r in rows]
+
+    # Second sync_turn for same session is a no-op (cache empty).
+    p.sync_turn("u", "a", session_id="s1")
+    rows2 = p._conn.execute(
+        f"SELECT hits FROM semantic_facts WHERE id IN ({placeholders})", cached_ids
+    ).fetchall()
+    assert all(r["hits"] == 1 for r in rows2)
+    p.shutdown()
+
+
+def test_run_coro_in_thread_timeout():
+    import asyncio as _asyncio
+
+    async def slow():
+        await _asyncio.sleep(2.0)
+        return "ok"
+
+    import pytest
+    with pytest.raises(TimeoutError):
+        _run_coro_in_thread(slow, timeout=0.05)
+
+
+def test_format_with_meta_shape():
+    facts = [
+        Fact(id=1, fact="致妤生日 3/19", entity="禮揚.家庭",
+             created_at="2026-05-01", importance=3, sim=0.7,
+             age_days=5.4, score=0.6),
+    ]
+    out = format_facts_for_prompt(facts, with_meta=True)
+    assert "(importance: 3, age: 5 days)" in out
+    out_compact = format_facts_for_prompt(facts, with_meta=False)
+    assert "importance" not in out_compact

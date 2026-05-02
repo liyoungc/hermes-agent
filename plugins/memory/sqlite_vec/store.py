@@ -51,10 +51,15 @@ END;
 """
 
 
-def open_db(db_path: Path) -> sqlite3.Connection:
-    """Open a sqlite connection with sqlite-vec extension loaded."""
+def open_db(db_path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """Open a sqlite connection with sqlite-vec extension loaded.
+
+    Pass ``check_same_thread=False`` when the connection will be reused
+    across threads (e.g. the provider's prefetch worker pool). Caller is
+    then responsible for serializing access via a lock.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=check_same_thread)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -70,8 +75,8 @@ def bootstrap_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
+def init_db(db_path: Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Open + bootstrap. Returns a ready-to-use connection."""
-    conn = open_db(db_path)
+    conn = open_db(db_path, check_same_thread=check_same_thread)
     bootstrap_schema(conn)
     return conn

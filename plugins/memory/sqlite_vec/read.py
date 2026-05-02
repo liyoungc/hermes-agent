@@ -142,16 +142,22 @@ async def bump_hits(fact_ids: Iterable[int], conn: sqlite3.Connection) -> None:
         logger.warning("bump_hits swallowed error for %d ids: %s", len(ids), exc)
 
 
-def format_facts_for_prompt(facts: List[Fact]) -> str:
+def format_facts_for_prompt(facts: List[Fact], *, with_meta: bool = False) -> str:
     """Render top-k facts as a markdown bullet list for system-prompt injection.
 
-    Used by SqliteVecMemoryProvider.prefetch() in W2-3. Compact, no header —
-    the surrounding prompt template owns the section title.
+    Used by SqliteVecMemoryProvider.prefetch() (with_meta=True per W2-3
+    spec) and /memdebug (with_meta=False for compact display).
+
+    No header — the caller owns the section title.
     """
     if not facts:
         return ""
     lines = []
     for f in facts:
         prefix = f"[{f.entity}] " if f.entity else ""
-        lines.append(f"- {prefix}{f.fact}")
+        suffix = (
+            f" (importance: {f.importance}, age: {int(f.age_days)} days)"
+            if with_meta else ""
+        )
+        lines.append(f"- {prefix}{f.fact}{suffix}")
     return "\n".join(lines)
