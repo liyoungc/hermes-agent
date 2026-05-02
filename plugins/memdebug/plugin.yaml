@@ -1,0 +1,4 @@
+name: memdebug
+version: 0.1.0
+description: "/memdebug — inspect Hermes long-term memory retrieval. Read-only diagnostic for the sqlite_vec memory plugin (W2-4)."
+author: "Li-yang Chen"

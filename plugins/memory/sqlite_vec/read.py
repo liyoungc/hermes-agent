@@ -29,7 +29,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_K = 8
 PREFILTER_K = 50
-DEFAULT_LOG_PATH = Path.home() / ".hermes" / "logs" / "memory.log"
+
+
+def _default_log_path() -> Path:
+    """Resolve the memory.log path lazily so HERMES_HOME (e.g. /opt/data
+    inside the container) wins over the worker thread's Path.home()."""
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()) / "logs" / "memory.log"
+    except Exception:
+        return Path.home() / ".hermes" / "logs" / "memory.log"
+
+
+DEFAULT_LOG_PATH = _default_log_path()
 
 # Spec §4 — SQL is locked. Do not edit weights without updating the spec
 # and re-running the B1 worked example.
