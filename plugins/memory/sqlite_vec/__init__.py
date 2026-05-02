@@ -50,6 +50,19 @@ WRITE_TIMEOUT_S = 30.0
 RECALL_HEADER = "## Recent relevant memories"
 
 
+def _mem_off_active() -> bool:
+    """True iff the global /mem off kill switch sentinel is present.
+
+    Late import to avoid circular plugin loading: plugins.memreview can
+    import provider symbols indirectly via the slash-command surface.
+    """
+    try:
+        from plugins.memreview import mem_off_active
+        return mem_off_active()
+    except Exception:
+        return False
+
+
 def _default_db_path(hermes_home: str) -> Path:
     return Path(hermes_home).expanduser() / "memories" / "memory.db"
 
@@ -214,10 +227,16 @@ class SqliteVecMemoryProvider(MemoryProvider):
             logger.warning("sqlite_vec bump_hits worker error: %s", exc)
 
         if user_content or assistant_content:
-            try:
-                _run_coro_in_thread(_do_write, timeout=WRITE_TIMEOUT_S)
-            except Exception as exc:
-                logger.warning("sqlite_vec write_episode worker error: %s", exc)
+            # /mem off kill switch: skip write_episode entirely. The hot path
+            # bump_hits ran above (read-side accounting), but no new
+            # episodes / facts are persisted. Read remains unaffected.
+            if _mem_off_active():
+                logger.info("sqlite_vec write_episode skipped (/mem off)")
+            else:
+                try:
+                    _run_coro_in_thread(_do_write, timeout=WRITE_TIMEOUT_S)
+                except Exception as exc:
+                    logger.warning("sqlite_vec write_episode worker error: %s", exc)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return []

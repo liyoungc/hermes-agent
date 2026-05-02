@@ -582,6 +582,18 @@ async def weekly_promotion(
     today = today or date.today()
     digest_id = digest_id_for(today)
 
+    # /mem off kill switch — skip the entire weekly cycle.
+    try:
+        from plugins.memreview import mem_off_active
+        if mem_off_active():
+            return {
+                "digest_id": digest_id,
+                "candidates": 0,
+                "skipped": "/mem off active",
+            }
+    except Exception:
+        pass
+
     candidates = _read_pending_episodes(conn)
     if not candidates:
         return {"digest_id": digest_id, "candidates": 0, "skipped": "no candidates"}
