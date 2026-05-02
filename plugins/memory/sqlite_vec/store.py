@@ -21,7 +21,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _VEC_VIRTUAL_TABLE_SQL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
   fact_id INTEGER PRIMARY KEY,
-  embedding int8[{VEC_DIM}]
+  embedding int8[{VEC_DIM}] distance_metric=cosine
 );
 """
 
