@@ -30,14 +30,15 @@ from plugins.memory.sqlite_vec.store import (
 # ---------------------------------------------------------------------------
 
 
-def _vec(seed: float) -> bytes:
-    """Make a deterministic 512-d float32 BLOB for testing.
+def _vec(seed: int) -> bytes:
+    """Make a deterministic 512-d int8 BLOB for testing.
 
-    seed is broadcast across all dimensions and then perturbed slightly so
-    different seeds produce different vectors but the same seed always
-    yields the same bytes.
+    int8 matches the locked decision in spec §1.4 (Voyage 3.5-lite, 512-dim, int8).
+    seed is the base value (clamped to int8 range) with a small per-dim offset
+    so different seeds produce different vectors but the same seed reproduces.
     """
-    return struct.pack(f"{VEC_DIM}f", *[seed + i * 1e-4 for i in range(VEC_DIM)])
+    vals = [max(-128, min(127, seed + (i % 7) - 3)) for i in range(VEC_DIM)]
+    return struct.pack(f"{VEC_DIM}b", *vals)
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,7 @@ def test_semantic_facts_defaults_are_populated(tmp_path):
     db = init_db(tmp_path / "memory.db")
     db.execute(
         "INSERT INTO semantic_facts(fact, embedding) VALUES (?, ?)",
-        ("禮揚 likes Starting Strength method", _vec(0.1)),
+        ("禮揚 likes Starting Strength method", _vec(10)),
     )
     db.commit()
 
@@ -135,7 +136,7 @@ def test_triggers_sync_insert_update_delete(tmp_path):
     # INSERT
     db.execute(
         "INSERT INTO semantic_facts(fact, embedding) VALUES (?, ?)",
-        ("fact A", _vec(0.5)),
+        ("fact A", _vec(50)),
     )
     db.commit()
     [(count_after_insert,)] = db.execute("SELECT count(*) FROM vec_facts").fetchall()
@@ -143,7 +144,7 @@ def test_triggers_sync_insert_update_delete(tmp_path):
 
     # UPDATE embedding
     [fact_id] = db.execute("SELECT id FROM semantic_facts").fetchone()
-    new_vec = _vec(0.9)
+    new_vec = _vec(90)
     db.execute("UPDATE semantic_facts SET embedding=? WHERE id=?", (new_vec, fact_id))
     db.commit()
     [(after_update,)] = db.execute(
@@ -165,16 +166,16 @@ def test_triggers_sync_insert_update_delete(tmp_path):
 
 def test_vec0_match_returns_nearest(tmp_path):
     db = init_db(tmp_path / "memory.db")
-    for seed, fact in [(0.1, "alpha"), (0.5, "beta"), (0.9, "gamma")]:
+    for seed, fact in [(10, "alpha"), (50, "beta"), (90, "gamma")]:
         db.execute(
             "INSERT INTO semantic_facts(fact, embedding) VALUES (?, ?)",
             (fact, _vec(seed)),
         )
     db.commit()
 
-    query = _vec(0.51)
+    query = _vec(51)
     rows = db.execute(
-        "SELECT fact_id, distance FROM vec_facts WHERE embedding MATCH ? AND k = 2",
+        "SELECT fact_id, distance FROM vec_facts WHERE embedding MATCH vec_int8(?) AND k = 2",
         (query,),
     ).fetchall()
     assert len(rows) == 2
@@ -201,3 +202,230 @@ def test_provider_lifecycle(tmp_path):
     assert p.sync_turn("hi", "hello") is None  # W1: no-op
     assert p.get_tool_schemas() == []
     p.shutdown()
+
+
+
+# ===========================================================================
+# W2-1: voyage_embed (mocked) + read_memory + bump_hits + format_facts
+# ===========================================================================
+
+import asyncio
+import sqlite3
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from plugins.memory.sqlite_vec.embed import (
+    VOYAGE_BATCH,
+    VOYAGE_DIM,
+    VoyageError,
+    voyage_embed,
+)
+from plugins.memory.sqlite_vec.read import (
+    Fact,
+    bump_hits,
+    format_facts_for_prompt,
+    read_memory,
+)
+
+
+def _fake_voyage_response(texts):
+    """Build a fake Voyage JSON body where each embedding is dim=512 of zeros
+    except the first cell which carries the input index. Lets us round-trip
+    the input ordering through _to_int8_blob."""
+    return {
+        "data": [
+            {"index": i, "embedding": [(i % 200) - 100] + [0] * (VOYAGE_DIM - 1)}
+            for i, _ in enumerate(texts)
+        ]
+    }
+
+
+class _MockTransport(httpx.MockTransport):
+    """httpx mock that records call count and returns programmable responses."""
+
+    def __init__(self, responses):
+        self.calls = []
+        self._responses = list(responses)
+        super().__init__(self._handler)
+
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls.append(request)
+        status, body = self._responses.pop(0)
+        if isinstance(body, dict):
+            return httpx.Response(status, json=body)
+        return httpx.Response(status, text=body)
+
+
+# ---------------------------------------------------------------------------
+# voyage_embed
+# ---------------------------------------------------------------------------
+
+
+def test_voyage_embed_success(monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    texts = ["hello", "world", "禮揚"]
+    transport = _MockTransport([(200, _fake_voyage_response(texts))])
+    client = httpx.AsyncClient(transport=transport)
+
+    blobs = asyncio.run(voyage_embed(texts, client=client))
+
+    assert len(blobs) == len(texts)
+    for b in blobs:
+        assert len(b) == VOYAGE_DIM
+    # First byte encodes the (signed) index value we baked into the fake response.
+    assert blobs[0][0] == (-100) & 0xFF  # input index 0 -> -100 -> unsigned 156
+    assert blobs[1][0] == (-99) & 0xFF
+    assert len(transport.calls) == 1
+
+
+def test_voyage_embed_batches_at_128(monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    texts = [f"t{i}" for i in range(200)]  # > VOYAGE_BATCH=128
+    # 2 calls: first 128, then 72.
+    transport = _MockTransport(
+        [
+            (200, _fake_voyage_response(texts[:VOYAGE_BATCH])),
+            (200, _fake_voyage_response(texts[VOYAGE_BATCH:])),
+        ]
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    blobs = asyncio.run(voyage_embed(texts, client=client))
+    assert len(blobs) == 200
+    assert len(transport.calls) == 2
+
+
+def test_voyage_embed_retries_on_5xx(monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    texts = ["only"]
+    transport = _MockTransport(
+        [
+            (502, "bad gateway"),
+            (503, "still bad"),
+            (200, _fake_voyage_response(texts)),
+        ]
+    )
+    client = httpx.AsyncClient(transport=transport)
+
+    # Patch sleep to avoid real backoff delay.
+    with patch("plugins.memory.sqlite_vec.embed.asyncio.sleep", return_value=None):
+        blobs = asyncio.run(voyage_embed(texts, client=client))
+
+    assert len(blobs) == 1
+    assert len(transport.calls) == 3
+
+
+def test_voyage_embed_4xx_raises(monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    transport = _MockTransport([(401, "unauthorized")])
+    client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(VoyageError):
+        asyncio.run(voyage_embed(["x"], client=client))
+
+
+def test_voyage_embed_missing_key(monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    with pytest.raises(VoyageError, match="VOYAGE_API_KEY"):
+        asyncio.run(voyage_embed(["x"]))
+
+
+def test_voyage_embed_empty_input_no_call(monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    # No transport responses queued; if we make a call the test will explode.
+    transport = _MockTransport([])
+    client = httpx.AsyncClient(transport=transport)
+    blobs = asyncio.run(voyage_embed([], client=client))
+    assert blobs == []
+    assert len(transport.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# read_memory + bump_hits
+# ---------------------------------------------------------------------------
+
+
+def _seed_facts(db: sqlite3.Connection):
+    """Insert 3 facts at known created_at + int8 vectors that put 'beta' nearest to seed=51."""
+    rows = [
+        # fact text,   entity,         created_at,             vec seed
+        ("alpha",      "禮揚.工作",     "2026-04-01 09:00:00",   10),
+        ("beta",       "禮揚.家庭",     "2026-05-02 09:00:00",   50),
+        ("gamma",      None,           "2025-12-01 09:00:00",   90),
+        ("expired",    "禮揚.短期",     "2026-05-01 09:00:00",   50),
+    ]
+    for fact, entity, created_at, seed in rows:
+        db.execute(
+            "INSERT INTO semantic_facts(fact, entity, embedding, created_at, valid_to) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (fact, entity, _vec(seed), created_at,
+             "2026-01-01" if fact == "expired" else None),
+        )
+    db.commit()
+
+
+def test_read_memory_orders_by_score(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    db = init_db(tmp_path / "memory.db")
+    _seed_facts(db)
+
+    # Stub voyage_embed to return a fixed query vector close to seed=51.
+    async def fake_embed(texts, **kw):
+        assert len(texts) == 1
+        return [_vec(51)]
+
+    log_file = tmp_path / "memory.log"
+    with patch("plugins.memory.sqlite_vec.read.voyage_embed", fake_embed):
+        facts = asyncio.run(read_memory("test query", db, k=8, log_path=log_file))
+
+    fact_texts = [f.fact for f in facts]
+    # 'expired' must be filtered (valid_to in past).
+    assert "expired" not in fact_texts
+    # 'beta' should rank first (closest vec, recent).
+    assert fact_texts[0] == "beta"
+    # All Fact fields populated.
+    assert all(isinstance(f, Fact) for f in facts)
+    assert all(f.score is not None and f.sim is not None for f in facts)
+    # Latency was logged.
+    assert log_file.exists()
+    log_line = log_file.read_text().strip().splitlines()[-1]
+    assert '"sql_ms"' in log_line and '"q": "test query"' in log_line
+
+
+def test_bump_hits_increments_and_swallows(tmp_path, monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    db = init_db(tmp_path / "memory.db")
+    _seed_facts(db)
+    ids = [r["id"] for r in db.execute("SELECT id FROM semantic_facts ORDER BY id").fetchall()]
+
+    asyncio.run(bump_hits(ids[:2], db))
+    rows = db.execute(
+        "SELECT id, hits, last_seen FROM semantic_facts ORDER BY id"
+    ).fetchall()
+    assert rows[0]["hits"] == 1 and rows[1]["hits"] == 1
+    assert rows[2]["hits"] == 0  # untouched
+    assert rows[0]["last_seen"] is not None
+
+    # Closed connection -> bump_hits must swallow the sqlite3.Error.
+    db.close()
+    asyncio.run(bump_hits(ids[:1], db))  # should not raise
+
+
+def test_bump_hits_empty_is_noop(tmp_path):
+    db = init_db(tmp_path / "memory.db")
+    # Should return immediately without touching the connection.
+    asyncio.run(bump_hits([], db))
+
+
+def test_format_facts_for_prompt_shape():
+    facts = [
+        Fact(id=1, fact="禮揚 likes 5x5", entity="禮揚.訓練",
+             created_at="2026-05-01", importance=2, sim=0.8, age_days=1.0, score=0.9),
+        Fact(id=2, fact="致妤生日 3/19", entity=None,
+             created_at="2026-04-01", importance=3, sim=0.7, age_days=30.0, score=0.6),
+    ]
+    out = format_facts_for_prompt(facts)
+    assert "[禮揚.訓練] 禮揚 likes 5x5" in out
+    assert "- 致妤生日 3/19" in out  # no entity prefix when None
+    assert format_facts_for_prompt([]) == ""

@@ -21,23 +21,26 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _VEC_VIRTUAL_TABLE_SQL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_facts USING vec0(
   fact_id INTEGER PRIMARY KEY,
-  embedding FLOAT[{VEC_DIM}]
+  embedding int8[{VEC_DIM}]
 );
 """
 
 # Triggers keep vec_facts in sync with semantic_facts. embedding is stored as
-# raw float32 BLOB on the relational side; vec0 reads the same bytes natively.
+# raw int8 BLOB (512 bytes) on the relational side; vec0 needs vec_int8()
+# wrapper to interpret it (without it, vec0 assumes float32).
 _TRIGGERS_SQL = """
 CREATE TRIGGER IF NOT EXISTS sf_after_insert
 AFTER INSERT ON semantic_facts
 BEGIN
-  INSERT INTO vec_facts(fact_id, embedding) VALUES (NEW.id, NEW.embedding);
+  INSERT INTO vec_facts(fact_id, embedding) VALUES (NEW.id, vec_int8(NEW.embedding));
 END;
 
 CREATE TRIGGER IF NOT EXISTS sf_after_update_embedding
 AFTER UPDATE OF embedding ON semantic_facts
 BEGIN
-  UPDATE vec_facts SET embedding = NEW.embedding WHERE fact_id = NEW.id;
+  -- vec0 int8 columns reject UPDATE even via vec_int8(); use DELETE+INSERT.
+  DELETE FROM vec_facts WHERE fact_id = NEW.id;
+  INSERT INTO vec_facts(fact_id, embedding) VALUES (NEW.id, vec_int8(NEW.embedding));
 END;
 
 CREATE TRIGGER IF NOT EXISTS sf_after_delete
