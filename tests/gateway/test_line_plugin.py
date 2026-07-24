@@ -789,6 +789,7 @@ async def test_enrollment_group_unknown_sender_reaches_only_the_required_gate():
                 "channel_secret": "secret",
                 "group_sender_dispatch_gate": "line-group-context",
                 "group_member_enrollment_groups": ["Capproved"],
+                "allowed_groups": ["Capproved"],
             },
         )
     )
