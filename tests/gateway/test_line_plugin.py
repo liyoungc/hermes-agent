@@ -824,7 +824,9 @@ async def test_enrollment_group_unknown_sender_reaches_only_the_required_gate():
 
 
 @pytest.mark.asyncio
-async def test_unknown_sender_outside_enrollment_groups_remains_at_adapter_boundary():
+async def test_unknown_sender_outside_enrollment_groups_remains_at_adapter_boundary(
+    caplog,
+):
     from gateway.config import PlatformConfig
 
     adapter = LineAdapter(
@@ -855,6 +857,40 @@ async def test_unknown_sender_outside_enrollment_groups_remains_at_adapter_bound
     )
 
     adapter.handle_message.assert_not_awaited()
+    assert "Cother" not in caplog.text
+    assert "Uunknown" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_line_lifecycle_logs_do_not_expose_transport_identity(caplog):
+    from gateway.config import PlatformConfig
+
+    adapter = LineAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "channel_access_token": "token",
+                "channel_secret": "secret",
+                "allowed_groups": ["Capproved"],
+            },
+        )
+    )
+
+    await adapter._dispatch_event(
+        {
+            "type": "join",
+            "webhookEventId": "01JLIFECYCLE",
+            "timestamp": 1_784_678_400_000,
+            "source": {
+                "type": "group",
+                "groupId": "Capproved",
+                "userId": "Umember",
+            },
+        }
+    )
+
+    assert "Capproved" not in caplog.text
+    assert "Umember" not in caplog.text
 
 
 @pytest.mark.asyncio
