@@ -145,6 +145,7 @@ class TestGatewayQuickCommands:
         event.source.platform.value = "telegram"
         event.source.chat_type = "dm"
         event.source.chat_id = "123"
+        event.required_dispatch_gate = None
         return event
 
     @pytest.mark.asyncio
