@@ -960,7 +960,10 @@ class LineAdapter(BasePlatformAdapter):
         # The only allowlist exception is an explicitly configured enrollment
         # group, and it still enters solely through the signed required gate.
         if not normally_allowed and not enrollment_group:
-            logger.info("LINE: rejecting unauthorized source %s", source)
+            logger.info(
+                "LINE: rejecting unauthorized source type %s",
+                source.get("type", "unknown"),
+            )
             return
 
         sender_admitted_group = bool(
@@ -983,7 +986,7 @@ class LineAdapter(BasePlatformAdapter):
         elif event_type == "postback":
             await self._handle_postback_event(event)
         elif event_type in {"follow", "unfollow", "join", "leave"}:
-            logger.info("LINE: lifecycle event %s from %s", event_type, source)
+            logger.info("LINE: lifecycle event %s", event_type)
         else:
             logger.debug("LINE: ignoring event type %r", event_type)
 

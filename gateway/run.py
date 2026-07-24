@@ -13727,7 +13727,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
 
-            response = agent_result.get("final_response") or ""
+            _guarded_operational_failure = bool(
+                getattr(source, "ingress_suppress_operational_output", False)
+                and agent_result.get("operational_failure_suppressed")
+            )
+            response = (
+                ""
+                if _guarded_operational_failure
+                else agent_result.get("final_response") or ""
+            )
             # Hidden-reasoning-only retry exhaustion: the loop's sentinel text
             # ("Codex response remained incomplete after 3 continuation
             # attempts") doubles as final_response, so it would be delivered
@@ -13792,7 +13800,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
-            if not _intentional_silence:
+            if not _intentional_silence and not _guarded_operational_failure:
                 response = _normalize_empty_agent_response(
                     agent_result, response, history_len=len(history),
                 )
@@ -19806,6 +19814,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "history_offset": len(history),
                     "session_id": session_id,
                     "response_previewed": False,
+                    "operational_failure_suppressed": True,
                 }
             return await self._run_agent_via_proxy(
                 message=message,
@@ -20898,6 +20907,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
             except Exception as exc:
+                if suppress_operational_output:
+                    logger.error(
+                        "Guarded gateway ingress suppressed provider runtime "
+                        "resolution failure: %s",
+                        type(exc).__name__,
+                    )
+                    return {
+                        "failed": True,
+                        "completed": False,
+                        "final_response": "",
+                        "messages": [],
+                        "api_calls": 0,
+                        "tools": [],
+                        "history_offset": len(history),
+                        "session_id": session_id,
+                        "operational_failure_suppressed": True,
+                    }
                 return {
                     "final_response": f"⚠️ Provider authentication failed: {exc}",
                     "messages": [],
@@ -21897,6 +21923,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            guarded_operational_failure = bool(
+                suppress_operational_output and result.get("failed")
+            )
+            if guarded_operational_failure:
+                logger.error(
+                    "Guarded gateway ingress suppressed an agent failure response"
+                )
+                final_response = ""
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0
@@ -22012,12 +22046,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
             if not final_response:
-                final_response = _normalize_empty_agent_response(
-                    result, final_response or "", history_len=len(agent_history),
-                )
-                final_response = _sanitize_gateway_final_response(source.platform, final_response)
-                if not final_response:
-                    final_response = f"⚠️ {result['error']}" if result.get("error") else ""
+                if not guarded_operational_failure:
+                    final_response = _normalize_empty_agent_response(
+                        result, final_response or "", history_len=len(agent_history),
+                    )
+                    final_response = _sanitize_gateway_final_response(source.platform, final_response)
+                    if not final_response:
+                        final_response = f"⚠️ {result['error']}" if result.get("error") else ""
                 return {
                     "final_response": final_response,
                     "messages": result.get("messages", []),
@@ -22038,6 +22073,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "operational_failure_suppressed": guarded_operational_failure,
                 }
 
             # Scan tool results for MEDIA:<path> tags that need to be delivered
