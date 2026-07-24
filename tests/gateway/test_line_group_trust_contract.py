@@ -366,6 +366,7 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
             self.user_name = kwargs["user_name"]
             self.chat_id = kwargs["chat_id"]
             self.chat_name = kwargs["chat_name"]
+            self.thread_id = kwargs["thread_id"]
             self.gateway_session_key = kwargs["gateway_session_key"]
             self.tools = []
             self.context_compressor = SimpleNamespace(
@@ -418,6 +419,7 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
         user_id_alt="member-alt-id",
         user_name="untrusted display name",
         chat_name="private group name",
+        thread_id="private-thread-id",
         ingress_shared_session=True,
         ingress_sender_authorized=True,
         ingress_enabled_toolsets=("mochiwiz",),
@@ -510,6 +512,7 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
     assert agent.user_id_alt is None
     assert agent.user_name is None
     assert agent.chat_name is None
+    assert agent.thread_id is None
     assert agent.chat_id.startswith("guarded-line:")
     assert agent.gateway_session_key == agent.chat_id
     for private_value in (
@@ -518,6 +521,7 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
         source.user_name,
         source.chat_id,
         source.chat_name,
+        source.thread_id,
     ):
         assert private_value not in agent.chat_id
         assert private_value not in agent.gateway_session_key

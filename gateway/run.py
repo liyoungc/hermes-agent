@@ -19780,8 +19780,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        suppress_operational_output = bool(
+            getattr(source, "ingress_suppress_operational_output", False)
+        )
+
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
+            if suppress_operational_output:
+                # The guarded LINE policy is minted and enforced by this
+                # gateway process.  A generic remote agent endpoint has no
+                # equivalent trusted policy channel, so forwarding would
+                # disclose private source identity and restore forbidden
+                # tools/output rails.  Keep the failure operator-visible only.
+                logger.error(
+                    "Guarded gateway ingress rejected because proxy mode cannot "
+                    "preserve its local trust policy"
+                )
+                return {
+                    "failed": True,
+                    "completed": False,
+                    "final_response": "",
+                    "messages": [],
+                    "api_calls": 0,
+                    "tools": [],
+                    "history_offset": len(history),
+                    "session_id": session_id,
+                    "response_previewed": False,
+                }
             return await self._run_agent_via_proxy(
                 message=message,
                 context_prompt=context_prompt,
@@ -19809,9 +19834,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ingress_toolsets = getattr(source, "ingress_enabled_toolsets", None)
         if ingress_toolsets is not None:
             enabled_toolsets = list(ingress_toolsets)
-        suppress_operational_output = bool(
-            getattr(source, "ingress_suppress_operational_output", False)
-        )
+
+        # Keep transport identities inside the trusted gateway/plugin boundary.
+        # The guarded group still gets one stable memory/cache namespace, but
+        # AIAgent and memory providers receive neither raw LINE IDs nor
+        # untrusted display/group names.
+        agent_user_id = source.user_id
+        agent_user_id_alt = source.user_id_alt
+        agent_user_name = source.user_name
+        agent_chat_id = source.chat_id
+        agent_chat_name = source.chat_name
+        agent_thread_id = source.thread_id
+        agent_gateway_session_key = session_key
+        if suppress_operational_output:
+            guarded_group_digest = hashlib.sha256(
+                f"guarded-line-group\0{source.chat_id}".encode("utf-8")
+            ).hexdigest()
+            guarded_group_alias = f"guarded-line:{guarded_group_digest}"
+            agent_user_id = None
+            agent_user_id_alt = None
+            agent_user_name = None
+            agent_chat_id = guarded_group_alias
+            agent_chat_name = None
+            agent_thread_id = None
+            agent_gateway_session_key = guarded_group_alias
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -20996,8 +21042,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 enabled_toolsets,
                 combined_ephemeral,
                 cache_keys=self._extract_cache_busting_config(user_config),
-                user_id=getattr(source, "user_id", None),
-                user_id_alt=getattr(source, "user_id_alt", None),
+                user_id=agent_user_id,
+                user_id_alt=agent_user_id_alt,
             )
             agent = None
             reused_cached_agent = False
@@ -21222,14 +21268,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     provider_data_collection=pr.get("data_collection"),
                     session_id=session_id,
                     platform=platform_key,
-                    user_id=source.user_id,
-                    user_id_alt=source.user_id_alt,
-                    user_name=source.user_name,
-                    chat_id=source.chat_id,
-                    chat_name=source.chat_name,
+                    user_id=agent_user_id,
+                    user_id_alt=agent_user_id_alt,
+                    user_name=agent_user_name,
+                    chat_id=agent_chat_id,
+                    chat_name=agent_chat_name,
                     chat_type=source.chat_type,
-                    thread_id=source.thread_id,
-                    gateway_session_key=session_key,
+                    thread_id=agent_thread_id,
+                    gateway_session_key=agent_gateway_session_key,
                     session_db=getattr(self._session_db, "_db", self._session_db),
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
