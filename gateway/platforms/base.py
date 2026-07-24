@@ -5666,6 +5666,12 @@ class BasePlatformAdapter(ABC):
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
             try:
+                if getattr(
+                    event.source,
+                    "ingress_suppress_operational_output",
+                    False,
+                ):
+                    return
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
                 _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))

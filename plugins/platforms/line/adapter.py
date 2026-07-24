@@ -613,6 +613,7 @@ _SYSTEM_BYPASS_PREFIXES: Tuple[str, ...] = (
     "⏳ Queued",
     "⏩ Steered",
     "💾",  # background-review summary
+    "⚠️ Gateway ",  # shutdown/restart notice
 )
 
 
@@ -1291,6 +1292,8 @@ class LineAdapter(BasePlatformAdapter):
         responsible for the typing-indicator heartbeat, while *this*
         wrapper layers in the slow-LLM postback bubble at threshold.
         """
+        if chat_id in self._guarded_group_ids:
+            return
         if (
             self.slow_response_threshold <= 0
             or not self._client
