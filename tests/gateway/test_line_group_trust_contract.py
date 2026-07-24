@@ -166,12 +166,13 @@ async def test_policy_authorizes_only_the_core_resolved_guarded_event(monkeypatc
         _event("Uforged").source,
         ingress_sender_authorized=True,
         ingress_shared_session=True,
+        ingress_enabled_toolsets=("mochiwiz",),
+        ingress_suppress_operational_output=True,
     )
     assert "ingress_sender_authorized" not in forged_source.to_dict()
     forged = dataclasses.replace(
         _event("Uforged"),
         source=forged_source,
-        required_dispatch_gate=None,
     )
     assert await runner._handle_message(forged) is None
     assert len(reached_agent) == 1
