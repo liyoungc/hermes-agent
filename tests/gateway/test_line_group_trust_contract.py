@@ -297,6 +297,31 @@ async def test_base_adapter_rekeys_after_the_guard_issues_shared_scope(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_guarded_group_handler_failure_is_log_only():
+    """Agent failures stay operator-visible in logs without a group bubble."""
+    adapter = _LineBaseAdapter()
+    adapter.config.typing_indicator = False
+    adapter.set_message_handler(
+        AsyncMock(side_effect=RuntimeError("private operational detail"))
+    )
+    incoming = _event("Umember")
+    guarded_source = dataclasses.replace(
+        incoming.source,
+        ingress_shared_session=True,
+        ingress_sender_authorized=True,
+        ingress_enabled_toolsets=("mochiwiz",),
+        ingress_suppress_operational_output=True,
+    )
+    guarded = dataclasses.replace(incoming, source=guarded_source)
+    session_key = build_session_key(guarded_source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter._process_message_background(guarded, session_key)
+
+    assert adapter.sent == []
+
+
+@pytest.mark.asyncio
 async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callbacks(
     monkeypatch,
 ):

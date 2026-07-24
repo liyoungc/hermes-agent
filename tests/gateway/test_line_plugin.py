@@ -876,6 +876,10 @@ async def test_guarded_group_suppresses_operational_bubbles_but_not_final_text()
     adapter._client.push = AsyncMock()
 
     busy = await adapter.send("Capproved", "⏳ Queued — agent is busy")
+    shutdown = await adapter.send(
+        "Capproved",
+        "⚠️ Gateway restarting — current task will be interrupted",
+    )
     notice = await adapter.send(
         "Capproved",
         "internal progress",
@@ -883,13 +887,48 @@ async def test_guarded_group_suppresses_operational_bubbles_but_not_final_text()
     )
     final = await adapter.send("Capproved", "The requested bookkeeping answer.")
 
-    assert busy.success and notice.success and final.success
+    assert busy.success and shutdown.success and notice.success and final.success
     assert adapter._client.push.await_count == 1
     assert (
         adapter._client.push.await_args.args[0]
         if adapter._client.push.await_args.args
         else adapter._client.push.await_args.kwargs["to"]
     ) == "Capproved"
+
+
+@pytest.mark.asyncio
+async def test_guarded_group_never_emits_slow_response_button():
+    from gateway.config import PlatformConfig
+
+    adapter = LineAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "channel_access_token": "token",
+                "channel_secret": "secret",
+                "group_sender_dispatch_gate": "line-group-context",
+                "group_member_enrollment_groups": ["Capproved"],
+                "slow_response_threshold": 0.001,
+            },
+        )
+    )
+    adapter._client = MagicMock()
+    adapter._client.loading = AsyncMock()
+    adapter._client.reply = AsyncMock()
+    adapter._reply_tokens["Capproved"] = ("reply-token", float("inf"))
+    stop_event = asyncio.Event()
+
+    task = asyncio.create_task(
+        adapter._keep_typing("Capproved", interval=0.005, stop_event=stop_event)
+    )
+    await asyncio.sleep(0.02)
+    stop_event.set()
+    await task
+
+    adapter._client.loading.assert_not_awaited()
+    adapter._client.reply.assert_not_awaited()
+    assert "Capproved" not in adapter._pending_buttons
+
 
     def test_get_chat_info_infers_type_from_prefix(self, monkeypatch):
         monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "t")
