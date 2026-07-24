@@ -179,6 +179,31 @@ async def test_policy_authorizes_only_the_core_resolved_guarded_event(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_guarded_group_cannot_invoke_gateway_commands(monkeypatch):
+    """Onboarding controls stay in the gate; core slash commands stay absent."""
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_plugin_manager",
+        lambda: _manager(
+            {
+                "scope": "shared_group",
+                "authorize_sender": True,
+                "enabled_toolsets": ["mochiwiz"],
+                "suppress_operational_output": True,
+            }
+        ),
+    )
+    runner = _runner()
+    runner._handle_restart_command = AsyncMock(return_value="must not run")
+    runner._handle_message_with_agent = AsyncMock(return_value="must not run")
+
+    assert await runner._handle_message(
+        _event("Umember", text="/restart")
+    ) is None
+    runner._handle_restart_command.assert_not_awaited()
+    runner._handle_message_with_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_guarded_policy_rejects_non_line_and_unsafe_toolsets(monkeypatch):
     """The policy vocabulary is narrow and LINE-group-only."""
     runner = _runner()
