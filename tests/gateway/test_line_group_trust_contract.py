@@ -361,6 +361,12 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
             self.session_id = kwargs["session_id"]
             self.enabled_toolsets = kwargs["enabled_toolsets"]
             self.model = kwargs["model"]
+            self.user_id = kwargs["user_id"]
+            self.user_id_alt = kwargs["user_id_alt"]
+            self.user_name = kwargs["user_name"]
+            self.chat_id = kwargs["chat_id"]
+            self.chat_name = kwargs["chat_name"]
+            self.gateway_session_key = kwargs["gateway_session_key"]
             self.tools = []
             self.context_compressor = SimpleNamespace(
                 last_prompt_tokens=0,
@@ -409,6 +415,9 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
         chat_id="Capproved",
         chat_type="group",
         user_id="Umember",
+        user_id_alt="member-alt-id",
+        user_name="untrusted display name",
+        chat_name="private group name",
         ingress_shared_session=True,
         ingress_sender_authorized=True,
         ingress_enabled_toolsets=("mochiwiz",),
@@ -497,5 +506,54 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
     assert agent.notice_callback is None
     assert agent.background_review_callback is None
     assert agent.clarify_callback is None
+    assert agent.user_id is None
+    assert agent.user_id_alt is None
+    assert agent.user_name is None
+    assert agent.chat_name is None
+    assert agent.chat_id.startswith("guarded-line:")
+    assert agent.gateway_session_key == agent.chat_id
+    for private_value in (
+        source.user_id,
+        source.user_id_alt,
+        source.user_name,
+        source.chat_id,
+        source.chat_name,
+    ):
+        assert private_value not in agent.chat_id
+        assert private_value not in agent.gateway_session_key
     register_notify.assert_not_called()
     adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_guarded_group_fails_closed_when_gateway_proxy_is_configured():
+    """A remote proxy cannot receive or reinterpret the core-issued policy."""
+    from gateway.run import GatewayRunner
+
+    source = dataclasses.replace(
+        _event("Umember").source,
+        ingress_shared_session=True,
+        ingress_sender_authorized=True,
+        ingress_enabled_toolsets=("mochiwiz",),
+        ingress_suppress_operational_output=True,
+    )
+    runner = object.__new__(GatewayRunner)
+    runner.config = SimpleNamespace(multiplex_profiles=False)
+    runner._get_proxy_url = lambda: "http://remote-agent.invalid"
+    runner._run_agent_via_proxy = AsyncMock(
+        return_value={"final_response": "remote policy bypass"}
+    )
+
+    result = await runner._run_agent(
+        message="must stay local",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="session-1",
+        session_key=build_session_key(source),
+    )
+
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert result["final_response"] == ""
+    runner._run_agent_via_proxy.assert_not_awaited()
