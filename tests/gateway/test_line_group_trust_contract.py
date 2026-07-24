@@ -111,7 +111,8 @@ def test_guarded_gateway_log_fields_hide_transport_identity_and_message_text():
 
     ordinary = _event("Uordinary")
     ordinary_fields = _gateway_inbound_log_fields(ordinary, ordinary.source)
-    assert ordinary.source.user_id in repr(ordinary_fields)
+    assert ordinary.source.user_name in repr(ordinary_fields)
+    assert ordinary.source.chat_id in repr(ordinary_fields)
     assert ordinary.text in repr(ordinary_fields)
 
 

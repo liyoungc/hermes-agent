@@ -469,6 +469,28 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
+def _gateway_inbound_log_fields(
+    event: Any,
+    source: Any,
+) -> tuple[str, str, str, Optional[str], str]:
+    """Return diagnostic fields without exposing guarded transport context."""
+    if getattr(source, "ingress_suppress_operational_output", False):
+        return (
+            "guarded-sender",
+            "guarded-group",
+            "<guarded message>",
+            "<guarded reply>" if getattr(event, "reply_to_message_id", None) else None,
+            "<guarded reply>" if getattr(event, "reply_to_text", None) else "",
+        )
+    return (
+        source.user_name or source.user_id or "unknown",
+        source.chat_id or "unknown",
+        (getattr(event, "text", None) or "")[:80].replace("\n", " "),
+        getattr(event, "reply_to_message_id", None),
+        (getattr(event, "reply_to_text", None) or "")[:80].replace("\n", " "),
+    )
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery.
 
@@ -12730,13 +12752,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-        _msg_preview = (event.text or "")[:80].replace("\n", " ")
-        _reply_id = getattr(event, "reply_to_message_id", None)
-        _reply_txt = (getattr(event, "reply_to_text", None) or "")[:80].replace("\n", " ")
+        (
+            _log_user,
+            _log_chat,
+            _msg_preview,
+            _reply_id,
+            _reply_txt,
+        ) = _gateway_inbound_log_fields(event, source)
         logger.info(
             "inbound message: platform=%s user=%s chat=%s msg=%r reply_to_id=%s reply_to_text=%r",
-            _platform_name, source.user_name or source.user_id or "unknown",
-            source.chat_id or "unknown", _msg_preview, _reply_id, _reply_txt,
+            _platform_name, _log_user,
+            _log_chat, _msg_preview, _reply_id, _reply_txt,
         )
 
         # Get or create session
@@ -13769,7 +13795,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _resp_len = len(response)
             logger.info(
                 "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
-                _platform_name, source.chat_id or "unknown",
+                _platform_name, _log_chat,
                 _response_time, _api_calls, _resp_len,
             )
 
