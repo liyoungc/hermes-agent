@@ -776,6 +776,121 @@ async def test_sender_admitted_group_carries_a_required_gate_and_signed_event_id
     assert event.platform_event_id == "01JLINEEVENT"
     assert event.platform_event_timestamp_ms == 1_784_678_400_000
 
+
+@pytest.mark.asyncio
+async def test_enrollment_group_unknown_sender_reaches_only_the_required_gate():
+    from gateway.config import PlatformConfig
+
+    adapter = LineAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "channel_access_token": "token",
+                "channel_secret": "secret",
+                "group_sender_dispatch_gate": "line-group-context",
+                "group_member_enrollment_groups": ["Capproved"],
+            },
+        )
+    )
+    captured = []
+
+    async def capture(event):
+        captured.append(event)
+
+    adapter.handle_message = capture
+    await adapter._dispatch_event(
+        {
+            "type": "message",
+            "webhookEventId": "01JMEMBERREQUEST",
+            "timestamp": 1_784_678_400_000,
+            "replyToken": "reply-token",
+            "source": {
+                "type": "group",
+                "groupId": "Capproved",
+                "userId": "Uunknown",
+            },
+            "message": {
+                "type": "text",
+                "id": "message-1",
+                "text": "/member request Family",
+            },
+        }
+    )
+
+    assert len(captured) == 1
+    assert captured[0].required_dispatch_gate == "line-group-context"
+    assert captured[0].platform_event_id == "01JMEMBERREQUEST"
+
+
+@pytest.mark.asyncio
+async def test_unknown_sender_outside_enrollment_groups_remains_at_adapter_boundary():
+    from gateway.config import PlatformConfig
+
+    adapter = LineAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "channel_access_token": "token",
+                "channel_secret": "secret",
+                "group_sender_dispatch_gate": "line-group-context",
+                "group_member_enrollment_groups": ["Capproved"],
+            },
+        )
+    )
+    adapter.handle_message = AsyncMock()
+
+    await adapter._dispatch_event(
+        {
+            "type": "message",
+            "webhookEventId": "01JOTHERGROUP",
+            "timestamp": 1_784_678_400_000,
+            "source": {
+                "type": "group",
+                "groupId": "Cother",
+                "userId": "Uunknown",
+            },
+            "message": {"type": "text", "id": "message-1", "text": "hello"},
+        }
+    )
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_guarded_group_suppresses_operational_bubbles_but_not_final_text():
+    from gateway.config import PlatformConfig
+
+    adapter = LineAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "channel_access_token": "token",
+                "channel_secret": "secret",
+                "group_sender_dispatch_gate": "line-group-context",
+                "group_member_enrollment_groups": ["Capproved"],
+            },
+        )
+    )
+    adapter._client = MagicMock()
+    adapter._client.reply = AsyncMock()
+    adapter._client.push = AsyncMock()
+
+    busy = await adapter.send("Capproved", "⏳ Queued — agent is busy")
+    notice = await adapter.send(
+        "Capproved",
+        "internal progress",
+        metadata={"non_conversational": True},
+    )
+    final = await adapter.send("Capproved", "The requested bookkeeping answer.")
+
+    assert busy.success and notice.success and final.success
+    assert adapter._client.push.await_count == 1
+    assert (
+        adapter._client.push.await_args.args[0]
+        if adapter._client.push.await_args.args
+        else adapter._client.push.await_args.kwargs["to"]
+    ) == "Capproved"
+
     def test_get_chat_info_infers_type_from_prefix(self, monkeypatch):
         monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "t")
         monkeypatch.setenv("LINE_CHANNEL_SECRET", "s")
