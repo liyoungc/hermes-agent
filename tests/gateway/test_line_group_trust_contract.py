@@ -81,6 +81,40 @@ def _manager(policy: dict):
     return manager
 
 
+def test_guarded_gateway_log_fields_hide_transport_identity_and_message_text():
+    from gateway.run import _gateway_inbound_log_fields
+
+    incoming = _event("Umember")
+    guarded = dataclasses.replace(
+        incoming,
+        text="private group message",
+        reply_to_message_id="private-reply-id",
+        reply_to_text="private quoted text",
+        source=dataclasses.replace(
+            incoming.source,
+            ingress_suppress_operational_output=True,
+        ),
+    )
+
+    fields = _gateway_inbound_log_fields(guarded, guarded.source)
+    serialized = repr(fields)
+
+    for private_value in (
+        guarded.source.user_id,
+        guarded.source.user_name,
+        guarded.source.chat_id,
+        guarded.text,
+        guarded.reply_to_message_id,
+        guarded.reply_to_text,
+    ):
+        assert private_value not in serialized
+
+    ordinary = _event("Uordinary")
+    ordinary_fields = _gateway_inbound_log_fields(ordinary, ordinary.source)
+    assert ordinary.source.user_id in repr(ordinary_fields)
+    assert ordinary.text in repr(ordinary_fields)
+
+
 @pytest.mark.asyncio
 async def test_gate_issues_one_shared_line_session_without_changing_global_isolation(
     monkeypatch,
