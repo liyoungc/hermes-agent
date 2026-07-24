@@ -4240,6 +4240,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             or not isinstance(getattr(event, "platform_event_timestamp_ms", None), int)
             or event.platform_event_timestamp_ms < 0
             or getattr(event, "source", None) is None
+            or bool(getattr(event.source, "ingress_shared_session", False))
+            or bool(getattr(event.source, "ingress_sender_authorized", False))
+            or getattr(event.source, "ingress_enabled_toolsets", None) is not None
+            or bool(
+                getattr(
+                    event.source,
+                    "ingress_suppress_operational_output",
+                    False,
+                )
+            )
         ):
             logger.warning("Dropping guarded ingress with invalid authenticated identity")
             return None
