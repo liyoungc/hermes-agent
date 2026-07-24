@@ -952,8 +952,7 @@ class LineAdapter(BasePlatformAdapter):
             allow_groups_from_allowed_users=self._sender_group_admission_enabled,
         )
         enrollment_group = bool(
-            not normally_allowed
-            and self._member_enrollment_enabled
+            self._member_enrollment_enabled
             and source.get("type") == "group"
             and source.get("groupId") in self.group_member_enrollment_groups
             and source.get("userId")
