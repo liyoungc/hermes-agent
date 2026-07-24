@@ -703,8 +703,18 @@ class LineAdapter(BasePlatformAdapter):
         self.group_sender_dispatch_gate = str(
             extra.get("group_sender_dispatch_gate", "") or ""
         ).strip()
+        enrollment_groups = extra.get("group_member_enrollment_groups", [])
+        self.group_member_enrollment_groups = {
+            str(value).strip()
+            for value in enrollment_groups
+            if isinstance(value, str) and value.strip()
+        }
         self._sender_group_admission_enabled = bool(
             self.allow_groups_from_allowed_users and self.group_sender_dispatch_gate
+        )
+        self._member_enrollment_enabled = bool(
+            self.group_member_enrollment_groups
+            and self.group_sender_dispatch_gate
         )
 
         # Slow-LLM postback button threshold
@@ -753,6 +763,11 @@ class LineAdapter(BasePlatformAdapter):
         # Pending-button slot per chat — ensures one outstanding postback
         # button per chat at a time. Postback cache request_id keyed by chat_id.
         self._pending_buttons: Dict[str, str] = {}
+        # Guarded groups may receive the final assistant response and
+        # exact-event control replies, but never operational/status bubbles.
+        self._guarded_group_ids: Set[str] = set(
+            self.group_member_enrollment_groups
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -927,15 +942,24 @@ class LineAdapter(BasePlatformAdapter):
         if self._bot_user_id and sender_user_id == self._bot_user_id:
             return
 
-        # Allowlist gate.
-        if not _allowed_for_source(
+        normally_allowed = _allowed_for_source(
             source,
             allow_all=self.allow_all,
             user_ids=self.allowed_users,
             group_ids=self.allowed_groups,
             room_ids=self.allowed_rooms,
             allow_groups_from_allowed_users=self._sender_group_admission_enabled,
-        ):
+        )
+        enrollment_group = bool(
+            not normally_allowed
+            and self._member_enrollment_enabled
+            and source.get("type") == "group"
+            and source.get("groupId") in self.group_member_enrollment_groups
+            and source.get("userId")
+        )
+        # The only allowlist exception is an explicitly configured enrollment
+        # group, and it still enters solely through the signed required gate.
+        if not normally_allowed and not enrollment_group:
             logger.info("LINE: rejecting unauthorized source %s", source)
             return
 
@@ -947,11 +971,14 @@ class LineAdapter(BasePlatformAdapter):
             and self._sender_group_admission_enabled
             and source.get("userId") in self.allowed_users
         )
+        guarded_group = sender_admitted_group or enrollment_group
+        if guarded_group and source.get("groupId"):
+            self._guarded_group_ids.add(str(source["groupId"]))
 
         if event_type == "message":
             await self._handle_message_event(
                 event,
-                sender_admitted_group=sender_admitted_group,
+                sender_admitted_group=guarded_group,
             )
         elif event_type == "postback":
             await self._handle_postback_event(event)
@@ -1165,6 +1192,13 @@ class LineAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not self._client:
             return SendResult(success=False, error="LINE adapter not connected")
+
+        if chat_id in self._guarded_group_ids and (
+            _is_system_bypass(content)
+            or bool((metadata or {}).get("non_conversational"))
+        ):
+            logger.debug("LINE: suppressed operational output for guarded group")
+            return SendResult(success=True, message_id=None)
 
         # System busy-acks (interrupting / queued / steered) bypass the
         # postback cache and route directly to LINE so they reach the user
@@ -1583,7 +1617,23 @@ def validate_config(config) -> bool:
         bool(extra.get("allow_groups_from_allowed_users", False)),
     )
     dispatch_gate = str(extra.get("group_sender_dispatch_gate", "") or "").strip()
-    return has_token and has_secret and (not allow_sender_groups or bool(dispatch_gate))
+    enrollment_groups = extra.get("group_member_enrollment_groups", [])
+    enrollment_groups_valid = (
+        isinstance(enrollment_groups, list)
+        and all(
+            isinstance(value, str)
+            and value.startswith("C")
+            and len(value) > 1
+            for value in enrollment_groups
+        )
+    )
+    guarded_admission = allow_sender_groups or bool(enrollment_groups)
+    return (
+        has_token
+        and has_secret
+        and enrollment_groups_valid
+        and (not guarded_admission or bool(dispatch_gate))
+    )
 
 
 def is_connected(config) -> bool:

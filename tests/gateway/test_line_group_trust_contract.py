@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from collections import OrderedDict
+import sys
+import threading
+import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -274,6 +278,9 @@ async def test_base_adapter_rekeys_after_the_guard_issues_shared_scope(monkeypat
         return dataclasses.replace(event, source=shared_source)
 
     adapter.set_ingress_resolver(resolve)
+    adapter.set_ingress_rebinder(
+        lambda _parents, child, _session_key: child
+    )
     scheduled = []
 
     def fake_create_task(coro):
@@ -287,3 +294,157 @@ async def test_base_adapter_rekeys_after_the_guard_issues_shared_scope(monkeypat
     assert scheduled == []
     assert adapter.get_pending_message(shared_key) is not None
     adapter._message_handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callbacks(
+    monkeypatch,
+):
+    """Tool/status/approval/clarify/compaction rails are absent for the group."""
+    import gateway.run as gateway_run
+
+    created = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.session_id = kwargs["session_id"]
+            self.enabled_toolsets = kwargs["enabled_toolsets"]
+            self.model = kwargs["model"]
+            self.tools = []
+            self.context_compressor = SimpleNamespace(
+                last_prompt_tokens=0,
+                context_length=200_000,
+            )
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            created.append(self)
+
+        def run_conversation(
+            self,
+            user_message,
+            conversation_history=None,
+            task_id=None,
+            **_kwargs,
+        ):
+            return {
+                "failed": False,
+                "final_response": "done",
+                "messages": [{"role": "assistant", "content": "done"}],
+                "api_calls": 1,
+            }
+
+        def interrupt(self, *_args, **_kwargs):
+            return None
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "0")
+
+    import hermes_cli.tools_config as tools_config
+    from tools import approval
+
+    monkeypatch.setattr(
+        tools_config,
+        "_get_platform_tools",
+        lambda *_args, **_kwargs: {"terminal", "web", "memory"},
+    )
+    register_notify = MagicMock()
+    monkeypatch.setattr(approval, "register_gateway_notify", register_notify)
+
+    source = SessionSource(
+        platform=LINE,
+        chat_id="Capproved",
+        chat_type="group",
+        user_id="Umember",
+        ingress_shared_session=True,
+        ingress_sender_authorized=True,
+        ingress_enabled_toolsets=("mochiwiz",),
+        ingress_suppress_operational_output=True,
+    )
+    session_key = build_session_key(source)
+    session_entry = SimpleNamespace(
+        session_key=session_key,
+        session_id="session-1",
+    )
+    adapter = MagicMock()
+    adapter.SUPPORTS_MESSAGE_EDITING = True
+    adapter.supports_status_text = True
+    adapter.send = AsyncMock()
+    adapter.get_pending_message.return_value = None
+    adapter.send_typing = AsyncMock()
+    adapter.stop_typing = AsyncMock()
+
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {LINE: adapter}
+    runner.config = SimpleNamespace(
+        streaming=None,
+        group_sessions_per_user=True,
+        thread_sessions_per_user=False,
+    )
+    runner.hooks = SimpleNamespace(loaded_hooks=True, emit=AsyncMock())
+    runner.session_store = SimpleNamespace(
+        _entries={session_key: session_entry},
+        _save=lambda: None,
+        _record_gateway_session_peer=lambda *_args: None,
+    )
+    runner._session_db = MagicMock()
+    runner._agent_cache = OrderedDict()
+    runner._agent_cache_lock = threading.Lock()
+    runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._session_run_generation = {}
+    runner._session_model_overrides = {}
+    runner._pending_model_notes = {}
+    runner._pending_skills_reload_notes = {}
+    runner._prefill_messages = []
+    runner._ephemeral_system_prompt = ""
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._draining = False
+    runner._get_proxy_url = lambda: None
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model",
+        {"provider": "test", "api_key": "token"},
+    )
+    runner._resolve_session_reasoning_config = lambda **_kwargs: None
+    runner._resolve_turn_agent_config = lambda message, model, runtime: {
+        "model": model,
+        "runtime": runtime,
+    }
+    runner._load_service_tier = lambda: None
+    runner._extract_cache_busting_config = lambda _config: ()
+    runner._thread_metadata_for_source = lambda *_args, **_kwargs: None
+    runner._sync_telegram_topic_binding = MagicMock()
+    runner._release_running_agent_state = MagicMock()
+
+    result = await asyncio.wait_for(
+        runner._run_agent(
+            message="record this",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-1",
+            session_key=session_key,
+        ),
+        timeout=2,
+    )
+
+    assert result["final_response"] == "done"
+    assert len(created) == 1
+    agent = created[0]
+    assert agent.enabled_toolsets == ["mochiwiz"]
+    assert agent.tool_progress_callback is None
+    assert agent.step_callback is None
+    assert agent.event_callback is None
+    assert agent.interim_assistant_callback is None
+    assert agent.status_callback is None
+    assert agent.notice_callback is None
+    assert agent.background_review_callback is None
+    assert agent.clarify_callback is None
+    register_notify.assert_not_called()
+    adapter.send.assert_not_awaited()

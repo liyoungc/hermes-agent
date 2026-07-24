@@ -4029,6 +4029,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             getattr(source, "is_bot", None),
             getattr(source, "role_authorized", None),
             getattr(source, "delivered_via_upstream_relay", None),
+            getattr(source, "ingress_shared_session", None),
+            getattr(source, "ingress_sender_authorized", None),
+            getattr(source, "ingress_enabled_toolsets", None),
+            getattr(source, "ingress_suppress_operational_output", None),
             bool(getattr(event, "internal", False)),
             getattr(event, "required_dispatch_gate", None),
         )
@@ -4136,6 +4140,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             isinstance(skills, list) and all(isinstance(skill, str) for skill in skills)
         )
 
+    @staticmethod
+    def _guarded_session_policy(
+        event: MessageEvent,
+        result: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        """Validate an optional, core-issued guarded session policy.
+
+        Omitting ``session_policy`` retains the enrichment-only gate contract.
+        When present, this migration's policy is deliberately exact: one LINE
+        group lane, one constrained plugin toolset, and no operational output.
+        A broader platform, tool, or display policy needs separate review.
+        """
+        if "session_policy" not in result:
+            return {}
+        policy = result.get("session_policy")
+        if not isinstance(policy, dict) or set(policy) != {
+            "scope",
+            "authorize_sender",
+            "enabled_toolsets",
+            "suppress_operational_output",
+        }:
+            return None
+        source = getattr(event, "source", None)
+        if (
+            source is None
+            or _gateway_platform_value(source.platform) != "line"
+            or source.chat_type != "group"
+            or policy.get("scope") != "shared_group"
+            or policy.get("authorize_sender") is not True
+            or policy.get("enabled_toolsets") != ["mochiwiz"]
+            or policy.get("suppress_operational_output") is not True
+        ):
+            return None
+        return {
+            "ingress_shared_session": True,
+            "ingress_sender_authorized": True,
+            "ingress_enabled_toolsets": ("mochiwiz",),
+            "ingress_suppress_operational_output": True,
+        }
+
     async def _resolve_gateway_ingress(
         self,
         event: MessageEvent,
@@ -4227,6 +4271,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
 
         approved = 0
+        approved_session_policy: dict[str, Any] = {}
         enriched_event = event
         for invocation in invocations:
             callback_event = invocation.event
@@ -4259,7 +4304,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if invocation.gate_owner != gate or result.get("gate") != gate:
                     logger.warning("Dropping guarded ingress after mismatched approval")
                     return None
+                session_policy = self._guarded_session_policy(callback_event, result)
+                if session_policy is None:
+                    logger.warning("Dropping guarded ingress after invalid session policy")
+                    return None
                 approved += 1
+                approved_session_policy = session_policy
             # Every callback receives its own copy of the original event so
             # one plugin cannot observe or contaminate another.  Apply only
             # fields a callback deliberately changed from that original
@@ -4279,9 +4329,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if approved != 1:
             logger.warning("Dropping guarded ingress without one matching approval")
             return None
+        if approved_session_policy:
+            enriched_event = dataclasses.replace(
+                enriched_event,
+                source=dataclasses.replace(
+                    enriched_event.source,
+                    **approved_session_policy,
+                ),
+            )
+        resolved_session_key = self._session_key_for_source(enriched_event.source)
         return (
             enriched_event
-            if self._remember_ingress_resolution(enriched_event, session_key)
+            if self._remember_ingress_resolution(
+                enriched_event,
+                resolved_session_key,
+            )
             else None
         )
 
@@ -10674,6 +10736,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if event is None:
                 return None
             source = event.source
+            ingress_session_key = self._session_key_for_source(source)
 
         if (
             getattr(self, "_startup_restore_in_progress", False)
@@ -10710,7 +10773,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not self._is_user_authorized(source):
                 logger.debug("Ignoring message with no user_id from %s", source.platform.value)
                 return None
-        elif not self._is_user_authorized(source):
+        elif not (
+            bool(getattr(event, "required_dispatch_gate", None))
+            and bool(getattr(source, "ingress_sender_authorized", False))
+        ) and not self._is_user_authorized(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
             if (
@@ -19713,6 +19779,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        ingress_toolsets = getattr(source, "ingress_enabled_toolsets", None)
+        if ingress_toolsets is not None:
+            enabled_toolsets = list(ingress_toolsets)
+        suppress_operational_output = bool(
+            getattr(source, "ingress_suppress_operational_output", False)
+        )
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -19764,6 +19836,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _env_tp and not _tool_progress_configured
             else (_resolved_tp or _env_tp or "all")
         )
+        if suppress_operational_output:
+            progress_mode = "off"
         # Tool progress grouping: "accumulate" (edit one bubble) or "separate" (one msg per tool)
         progress_grouping = resolve_display_setting(user_config, platform_key, "tool_progress_grouping") or "accumulate"
         from gateway.status_phrases import choose_status_phrase, resolve_status_phrase_catalog
@@ -19826,6 +19900,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _live_status_adapter = None
         if _live_status_mode == "off":
             _live_status_adapter = None
+        if suppress_operational_output:
+            _live_status_adapter = None
         # "log" mode: tool calls are written to ~/.hermes/logs/tool_calls.log
         # instead of the chat (#3459 / #3458). Gateway-only by design.
         log_mode_enabled = progress_mode == "log" and source.platform != Platform.WEBHOOK
@@ -19841,6 +19917,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         interim_assistant_messages_enabled = (
             source.platform != Platform.WEBHOOK
             and interim_assistant_messages_mode != "off"
+            and not suppress_operational_output
         )
         # thinking_progress is independent — if enabled, we need the progress
         # queue even when tool_progress is off (thinking relay uses same infra).
@@ -19851,7 +19928,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             default=False,
             require_platform_override_for={Platform.MATTERMOST},
         )
-        _thinking_enabled = _thinking_mode != "off"
+        _thinking_enabled = (
+            _thinking_mode != "off" and not suppress_operational_output
+        )
         needs_progress_queue = tool_progress_enabled or _thinking_enabled
 
 
@@ -20639,6 +20718,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self._adapter_for_source(source)
+        if suppress_operational_output:
+            _status_adapter = None
         _status_chat_id = source.chat_id
         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
             # Feishu topics only keep messages inside the topic when they are
@@ -20781,6 +20862,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
+            if suppress_operational_output:
+                _streaming_enabled = False
             _want_stream_deltas = _streaming_enabled
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
@@ -21161,10 +21244,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent.tool_start_callback = (
                 voice_ack_callback if _voice_ack_guild[0] is not None else None
             )
-            agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+            agent.step_callback = (
+                _step_callback_sync
+                if _hooks_ref.loaded_hooks and not suppress_operational_output
+                else None
+            )
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
-            agent.status_callback = _status_callback_sync
+            agent.status_callback = (
+                None if suppress_operational_output else _status_callback_sync
+            )
             # Credits / out-of-band notices (usage bands, depletion, restored).
             # Messaging has no persistent status bar, so each notice is a
             # standalone push: render to a single plaintext line and deliver via
@@ -21194,9 +21283,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     log_message="notice_callback delivery scheduling error",
                 )
 
-            agent.notice_callback = _notice_callback_sync
+            agent.notice_callback = (
+                None if suppress_operational_output else _notice_callback_sync
+            )
             agent.notice_clear_callback = None
-            agent.event_callback = _event_callback_sync
+            agent.event_callback = (
+                None if suppress_operational_output else _event_callback_sync
+            )
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
@@ -21246,7 +21339,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             return
                 _deliver_bg_review_message(message)
 
-            agent.background_review_callback = _bg_review_send
+            agent.background_review_callback = (
+                None if suppress_operational_output else _bg_review_send
+            )
             # Register the release hook on the adapter so base.py's finally
             # block can fire it after delivering the main response.
             if _status_adapter and session_key:
@@ -21342,7 +21437,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return f"[user did not respond within {int(timeout / 60)}m]"
                 return response
 
-            agent.clarify_callback = _clarify_callback_sync
+            agent.clarify_callback = (
+                None if suppress_operational_output else _clarify_callback_sync
+            )
 
             # Show assistant thinking between tool calls — independent of
             # tool_progress mode. Mattermost needs an explicit per-platform
@@ -21653,7 +21750,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
-            register_gateway_notify(_approval_session_key, _approval_notify_sync)
+            if not suppress_operational_output:
+                register_gateway_notify(
+                    _approval_session_key,
+                    _approval_notify_sync,
+                )
             try:
                 # If _prepare_inbound_message_text buffered image paths for native
                 # attachment, wrap the user turn as an OpenAI-style multimodal
@@ -21704,7 +21805,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
-                unregister_gateway_notify(_approval_session_key)
+                if not suppress_operational_output:
+                    unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent
                 # threads don't hang past the end of the run (interrupt,
                 # completion, gateway shutdown).  Idempotent.

@@ -204,6 +204,16 @@ class SessionSource:
     # forge it across the wire or have it restored from persistence.
     delivered_via_upstream_relay: bool = False
 
+    # Internal, wire-INVISIBLE guarded-ingress policy. These values are issued
+    # by GatewayRunner only after an authenticated event passes its one
+    # declared gate owner. They deliberately stay out of
+    # ``to_dict``/``from_dict`` so adapters, relays, persisted sessions, and
+    # synthetic restore events cannot manufacture an authorization decision.
+    ingress_shared_session: bool = False
+    ingress_sender_authorized: bool = False
+    ingress_enabled_toolsets: Optional[tuple[str, ...]] = None
+    ingress_suppress_operational_output: bool = False
+
     def __post_init__(self) -> None:
         # D-Q2.5 dual-field reconciliation: `scope_id` is canonical, `guild_id`
         # is the deprecated alias. Mirror whichever was provided onto the other
@@ -890,6 +900,12 @@ def is_shared_multi_user_session(
     """
     if source.chat_type == "dm":
         return False
+    if (
+        getattr(source.platform, "value", source.platform) == "line"
+        and source.chat_type == "group"
+        and source.ingress_shared_session
+    ):
+        return True
     if source.thread_id:
         return not thread_sessions_per_user
     return not group_sessions_per_user
@@ -997,6 +1013,12 @@ def build_session_key(
     # conversation).  Per-user isolation only applies when explicitly enabled
     # via thread_sessions_per_user, or when there is no thread (regular group).
     isolate_user = group_sessions_per_user
+    if (
+        getattr(source.platform, "value", source.platform) == "line"
+        and source.chat_type == "group"
+        and source.ingress_shared_session
+    ):
+        isolate_user = False
     if source.thread_id and not thread_sessions_per_user:
         isolate_user = False
 
