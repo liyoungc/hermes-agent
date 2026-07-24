@@ -10827,6 +10827,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
+
+        # Guarded group controls are owned by the ingress plugin and have
+        # already returned ``skip`` above. Do not expose Hermes management
+        # commands (restart/reset/approve/steer/etc.) on the shared Cattia
+        # surface.
+        if (
+            bool(
+                getattr(
+                    source,
+                    "ingress_suppress_operational_output",
+                    False,
+                )
+            )
+            and event.get_command()
+        ):
+            logger.info("Dropping core command for guarded ingress")
+            return None
         
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
