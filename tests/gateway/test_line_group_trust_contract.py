@@ -384,6 +384,15 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
             task_id=None,
             **_kwargs,
         ):
+            if user_message == "force provider failure":
+                return {
+                    "failed": True,
+                    "completed": False,
+                    "final_response": "private provider failure detail",
+                    "error": "private provider failure detail",
+                    "messages": [],
+                    "api_calls": 1,
+                }
             return {
                 "failed": False,
                 "final_response": "done",
@@ -527,6 +536,22 @@ async def test_guarded_group_agent_has_only_mochiwiz_and_no_operational_callback
         assert private_value not in agent.gateway_session_key
     register_notify.assert_not_called()
     adapter.send.assert_not_awaited()
+
+    failed = await asyncio.wait_for(
+        runner._run_agent(
+            message="force provider failure",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-1",
+            session_key=session_key,
+        ),
+        timeout=2,
+    )
+
+    assert failed["failed"] is True
+    assert failed["completed"] is False
+    assert failed["final_response"] == ""
 
 
 @pytest.mark.asyncio
