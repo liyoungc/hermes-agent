@@ -342,8 +342,18 @@ if [ -f "$HERMES_HOME/config.yaml" ]; then
     if refuse_symlinked_path "chown/chmod" "$HERMES_HOME/config.yaml"; then
         :
     else
-        chown hermes:hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
-        chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        # chown/chmod advance ctime even when ownership and mode already match.
+        # Avoid metadata churn so supervisors can detect real post-start edits.
+        config_uid=$(stat -c %u "$HERMES_HOME/config.yaml" 2>/dev/null || true)
+        config_gid=$(stat -c %g "$HERMES_HOME/config.yaml" 2>/dev/null || true)
+        config_mode=$(stat -c %a "$HERMES_HOME/config.yaml" 2>/dev/null || true)
+        if [ "$config_uid" != "$(id -u hermes)" ] || \
+            [ "$config_gid" != "$(id -g hermes)" ]; then
+            chown hermes:hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        fi
+        if [ "$config_mode" != 640 ]; then
+            chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
+        fi
     fi
 fi
 
